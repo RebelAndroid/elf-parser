@@ -1,4 +1,12 @@
-use std::{alloc::System, env, fs::File, io::Read, process::ExitCode, ffi::{CStr, CString}};
+use std::{
+    alloc::System,
+    collections::HashMap,
+    env,
+    ffi::{CStr, CString},
+    fs::File,
+    io::Read,
+    process::ExitCode,
+};
 
 #[derive(Debug)]
 struct EIdent {
@@ -69,7 +77,7 @@ struct ELFHeader {
     program_header_entry_count: u16,
     section_header_entry_size: u16,
     section_header_entry_count: u16,
-    section_header_string_index: u16,
+    section_header_string_table_index: u16,
 }
 
 #[derive(Debug, PartialEq)]
@@ -116,6 +124,14 @@ fn main() {
         panic!("file is too small to contain an ELF header!");
     }
 
+    if file_bytes[0..4] != [0x7F, 0x45, 0x4C, 0x46] {
+        panic!(
+            "Not an ELF file\nexpected magic number: {:#?}\nfound: {},{},{},{}",
+            [0x7F, 0x45, 0x4C, 0x46],
+            file_bytes[0],file_bytes[1],file_bytes[2],file_bytes[3]
+        );
+    }
+
     let e_ident: EIdent = EIdent {
         ei_mag: file_bytes[0..4].try_into().unwrap(),
         ei_class: match file_bytes[4] {
@@ -139,13 +155,7 @@ fn main() {
         ei_abi_version: file_bytes[8],
         ei_pad: file_bytes[9..16].try_into().unwrap(),
     };
-    if e_ident.ei_mag != [0x7F, 0x45, 0x4C, 0x46] {
-        panic!(
-            "invalid magic number\nexpected: {:#?}\nfound: {:#?}",
-            [0x7F, 0x45, 0x4C, 0x46],
-            e_ident.ei_mag
-        );
-    }
+    
     if e_ident.ei_pad != [0; 7] {
         println!(
             "unknown data in padding: {:#?}\nExpected: {:#?}",
@@ -240,7 +250,7 @@ fn main() {
         section_header_entry_count: u16_parse_bytes(
             file_bytes[index + 12..index + 14].try_into().unwrap(),
         ),
-        section_header_string_index: u16_parse_bytes(
+        section_header_string_table_index: u16_parse_bytes(
             file_bytes[index + 14..index + 16].try_into().unwrap(),
         ),
     };
@@ -260,21 +270,24 @@ fn main() {
 
     let mut section_headers: Vec<ELFSectionHeader> = vec![];
 
-    for i in 0..elf_header.section_header_entry_count {
+    for section_header_index in 0..elf_header.section_header_entry_count {
         let index = match elf_header.section_header_offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
-        } + i as usize * elf_header.section_header_entry_size as usize;
+        } + section_header_index as usize
+            * elf_header.section_header_entry_size as usize;
 
-        let var_index = match e_ident.ei_class{
+        let var_index = match e_ident.ei_class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => index + 24,
             ELFClass::Class64 => index + 40,
         };
-        
+
         let section_header = ELFSectionHeader {
-            name: u32_parse_bytes(file_bytes[index..index+4].try_into().unwrap()),
-            section_type: match u32_parse_bytes(file_bytes[index+4..index+8].try_into().unwrap()){
+            name: u32_parse_bytes(file_bytes[index..index + 4].try_into().unwrap()),
+            section_type: match u32_parse_bytes(
+                file_bytes[index + 4..index + 8].try_into().unwrap(),
+            ) {
                 0 => ELFSectionType::Null,
                 1 => ELFSectionType::ProgramBits,
                 2 => ELFSectionType::SymbolTable,
@@ -294,80 +307,105 @@ fn main() {
                 18 => ELFSectionType::SYMTABSHNDX,
                 _ => ELFSectionType::Null, // TODO special section types
             },
-            flags: match e_ident.ei_class{
+            flags: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[index+8..index+12].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[index+8..index+16].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[index + 8..index + 12].try_into().unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[index + 8..index + 16].try_into().unwrap(),
+                )),
             },
-            address: match e_ident.ei_class{
+            address: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[index+12..index+16].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[index+16..index+24].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[index + 12..index + 16].try_into().unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[index + 16..index + 24].try_into().unwrap(),
+                )),
             },
-            offset: match e_ident.ei_class{
+            offset: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[index+16..index+20].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[index+24..index+32].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[index + 16..index + 20].try_into().unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[index + 24..index + 32].try_into().unwrap(),
+                )),
             },
-            size: match e_ident.ei_class{
+            size: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[index+20..index+24].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[index+32..index+40].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[index + 20..index + 24].try_into().unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[index + 32..index + 40].try_into().unwrap(),
+                )),
             },
             link: u32_parse_bytes(file_bytes[var_index..var_index + 4].try_into().unwrap()),
             info: u32_parse_bytes(file_bytes[var_index + 4..var_index + 8].try_into().unwrap()),
-            address_alignment: match e_ident.ei_class{
+            address_alignment: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[var_index + 8..var_index + 12].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[var_index + 8..var_index + 16].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[var_index + 8..var_index + 12]
+                        .try_into()
+                        .unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[var_index + 8..var_index + 16]
+                        .try_into()
+                        .unwrap(),
+                )),
             },
-            entry_size: match e_ident.ei_class{
+            entry_size: match e_ident.ei_class {
                 ELFClass::ClassNone => unreachable!(),
-                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(file_bytes[var_index + 12..var_index + 16].try_into().unwrap())),
-                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(file_bytes[var_index + 16..var_index + 24].try_into().unwrap())),
+                ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                    file_bytes[var_index + 12..var_index + 16]
+                        .try_into()
+                        .unwrap(),
+                )),
+                ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                    file_bytes[var_index + 16..var_index + 24]
+                        .try_into()
+                        .unwrap(),
+                )),
             },
         };
 
-        //println!("Section header:\n{:#?}", section_header);
-        if section_header.section_type == ELFSectionType::StringTable{
-            let string_table_end = match (section_header.offset, section_header.size){
-                (ELFAddress::ELF64(offset), ELFAddress::ELF64(size)) => (offset + size) as usize, // TODO better handling of 64bit ELFs on 32bit machines
-                (ELFAddress::ELF32(offset), ELFAddress::ELF32(size)) => (offset + size) as usize, 
-                (ELFAddress::ELF64(_), ELFAddress::ELF32(_)) => unreachable!(),
-                (ELFAddress::ELF32(_), ELFAddress::ELF64(_)) => unreachable!(),
-            };
-            if string_table_end > file_bytes.len(){
-                panic!("string table goes beyond end of file! Length of file: {}, expected end of string table: {}", file_bytes.len(), string_table_end);
-            }
-            let strings = unsafe {get_strings(&file_bytes, match section_header.offset{
-                ELFAddress::ELF64(x) => x as usize,
-                ELFAddress::ELF32(x) => x as usize,
-            }, string_table_end)
-            };
-            for s in strings{
-                println!("String: {}", s);
-            }
-            
-        };
+        println!("section header: {:#?}", section_header);
 
         section_headers.push(section_header);
-        
     }
 
+    let string_table_start =
+        match section_headers[elf_header.section_header_string_table_index as usize].offset {
+            ELFAddress::ELF64(x) => x as usize,
+            ELFAddress::ELF32(x) => x as usize,
+        };
+    let string_table_end =
+        match section_headers[elf_header.section_header_string_table_index as usize].size {
+            ELFAddress::ELF64(x) => x as usize,
+            ELFAddress::ELF32(x) => x as usize,
+        } + string_table_start;
+    for section_header in section_headers {
+        println!("Section name: {}", unsafe {
+            get_string(&file_bytes, string_table_start + section_header.name as usize, string_table_end)
+        });
+    }
 }
 
-unsafe fn get_strings(bytes: &[u8], start: usize, end: usize) -> Vec<String>{
-    let mut strings = vec![];
+unsafe fn get_string(bytes: &[u8], start: usize, end: usize) -> String {
     let mut i = start;
-    let mut first_byte = start; // this is the first byte of the current string
-    while i < end{
-        if(bytes[i] == 0){         
-            let str = CStr::from_ptr(bytes.as_ptr().add(first_byte) as *const i8).to_str().unwrap(); // TODO better error handling
-            strings.push(str.to_owned());
-            first_byte = i + 1;
-        }
+    while bytes[i] != 0 {
         i += 1;
+        if i >= end {
+            panic!("index out of bounds! i: {} end: {}", i, end);
+        }
     }
+    let str = CStr::from_ptr(bytes.as_ptr().add(start) as *const i8)
+        .to_str()
+        .unwrap(); // TODO better error handling
 
-    return strings;
+    return str.to_owned(); // to_owned() probably not necessary TODO: fix
 }
