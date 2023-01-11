@@ -164,8 +164,6 @@ fn main() {
     }
     println!("ELF identification information:\n{:#?}", e_ident);
 
-    if (e_ident.ei_class == ELFClass::ClassNone) {}
-
     // where the indices of the ELFHeader start after the variable length portion
     // the index of the first byte of flags
     let index = match e_ident.ei_class {
@@ -268,9 +266,179 @@ fn main() {
         panic!("section header goes beyond end of file! Length of file: {}, expected end of header_file: {}", file_bytes.len(), section_header_end);
     }
 
-    let mut section_headers: Vec<ELFSectionHeader> = vec![];
+    
 
-    for section_header_index in 0..elf_header.section_header_entry_count {
+    // first parse the first section header because it is special
+    let index = match elf_header.section_header_offset {
+        ELFAddress::ELF64(x) => x as usize,
+        ELFAddress::ELF32(x) => x as usize,
+    };
+    let var_index = match e_ident.ei_class {
+        ELFClass::ClassNone => unreachable!(),
+        ELFClass::Class32 => index + 24,
+        ELFClass::Class64 => index + 40,
+    };
+
+    let first_section_header = ELFSectionHeader {
+        name: u32_parse_bytes(file_bytes[index..index + 4].try_into().unwrap()),
+        section_type: match u32_parse_bytes(
+            file_bytes[index + 4..index + 8].try_into().unwrap(),
+        ) {
+            0 => ELFSectionType::Null,
+            1 => ELFSectionType::ProgramBits,
+            2 => ELFSectionType::SymbolTable,
+            3 => ELFSectionType::StringTable,
+            4 => ELFSectionType::RelocationWithAddends,
+            5 => ELFSectionType::SymbolHashTable,
+            6 => ELFSectionType::Dynamic,
+            7 => ELFSectionType::Note,
+            8 => ELFSectionType::NoBits,
+            9 => ELFSectionType::Relocation,
+            10 => ELFSectionType::SHLIB,
+            11 => ELFSectionType::DynamicLinkingSymbolTable,
+            14 => ELFSectionType::InitArray,
+            15 => ELFSectionType::FiniArray,
+            16 => ELFSectionType::PreInitArray,
+            17 => ELFSectionType::Group,
+            18 => ELFSectionType::SYMTABSHNDX,
+            _ => ELFSectionType::Null, // TODO special section types
+        },
+        flags: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[index + 8..index + 12].try_into().unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[index + 8..index + 16].try_into().unwrap(),
+            )),
+        },
+        address: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[index + 12..index + 16].try_into().unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[index + 16..index + 24].try_into().unwrap(),
+            )),
+        },
+        offset: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[index + 16..index + 20].try_into().unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[index + 24..index + 32].try_into().unwrap(),
+            )),
+        },
+        size: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[index + 20..index + 24].try_into().unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[index + 32..index + 40].try_into().unwrap(),
+            )),
+        },
+        link: u32_parse_bytes(file_bytes[var_index..var_index + 4].try_into().unwrap()),
+        info: u32_parse_bytes(file_bytes[var_index + 4..var_index + 8].try_into().unwrap()),
+        address_alignment: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[var_index + 8..var_index + 12]
+                    .try_into()
+                    .unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[var_index + 8..var_index + 16]
+                    .try_into()
+                    .unwrap(),
+            )),
+        },
+        entry_size: match e_ident.ei_class {
+            ELFClass::ClassNone => unreachable!(),
+            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
+                file_bytes[var_index + 12..var_index + 16]
+                    .try_into()
+                    .unwrap(),
+            )),
+            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+                file_bytes[var_index + 16..var_index + 24]
+                    .try_into()
+                    .unwrap(),
+            )),
+        },
+    };
+    if first_section_header.name != 0{
+        println!("unknown data contained in first section header name: {}, exiting.", first_section_header.name);
+        std::process::exit(0);
+    }
+    if first_section_header.section_type != ELFSectionType::Null{
+        println!("unknown data contained in first section header type: {:#?}, exiting.", first_section_header.section_type);
+        std::process::exit(0);
+    }
+
+    // the bits of the flag data in the first section header, extended to 64 bits
+    let flag = match first_section_header.flags {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    if flag != 0{
+        println!("unknown data contained in first section header flags: {}, exiting.", flag);
+        std::process::exit(0);
+    }
+
+    let address = match first_section_header.address {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    if address != 0{
+        println!("unknown data contained in first section header flags: {}, exiting.", address);
+        std::process::exit(0);
+    }
+
+    let offset = match first_section_header.offset {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    if offset != 0{
+        println!("unknown data contained in first section header flags: {}, exiting.", offset);
+        std::process::exit(0);
+    }
+
+    let address_alignment = match first_section_header.address_alignment {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    if address_alignment != 0{
+        println!("unknown data contained in first section header flags: {}, exiting.", address_alignment);
+        std::process::exit(0);
+    }
+
+    let entry_size = match first_section_header.entry_size {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    if entry_size != 0{
+        println!("unknown data contained in first section header flags: {}, exiting.", entry_size);
+        std::process::exit(0);
+    }
+
+    let size = match first_section_header.size {
+        ELFAddress::ELF64(x) => x as u64,
+        ELFAddress::ELF32(x) => x as u64,
+    };
+    // TODO: check that appropriate elf_header fields are zero when using data from first section header.
+    let (section_header_entry_count, section_header_string_table_index) = if size != 0 || first_section_header.link != 0{
+        (size, first_section_header.link)
+    }else{
+        (elf_header.section_header_entry_count as u64, elf_header.section_header_string_table_index as u32)
+    };
+
+    
+
+    // then parse the rest
+    let mut section_headers: Vec<ELFSectionHeader> = vec![];
+    for section_header_index in 1..section_header_entry_count {
         let index = match elf_header.section_header_offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
@@ -379,12 +547,12 @@ fn main() {
     }
 
     let string_table_start =
-        match section_headers[elf_header.section_header_string_table_index as usize].offset {
+        match section_headers[section_header_string_table_index as usize].offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         };
     let string_table_end =
-        match section_headers[elf_header.section_header_string_table_index as usize].size {
+        match section_headers[section_header_string_table_index as usize].size {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
