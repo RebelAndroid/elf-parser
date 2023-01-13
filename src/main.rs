@@ -128,7 +128,10 @@ fn main() {
         panic!(
             "Not an ELF file\nexpected magic number: {:#?}\nfound: {},{},{},{}",
             [0x7F, 0x45, 0x4C, 0x46],
-            file_bytes[0],file_bytes[1],file_bytes[2],file_bytes[3]
+            file_bytes[0],
+            file_bytes[1],
+            file_bytes[2],
+            file_bytes[3]
         );
     }
 
@@ -155,7 +158,7 @@ fn main() {
         ei_abi_version: file_bytes[8],
         ei_pad: file_bytes[9..16].try_into().unwrap(),
     };
-    
+
     if e_ident.ei_pad != [0; 7] {
         println!(
             "unknown data in padding: {:#?}\nExpected: {:#?}",
@@ -266,8 +269,6 @@ fn main() {
         panic!("section header goes beyond end of file! Length of file: {}, expected end of header_file: {}", file_bytes.len(), section_header_end);
     }
 
-    
-
     // first parse the first section header because it is special
     let index = match elf_header.section_header_offset {
         ELFAddress::ELF64(x) => x as usize,
@@ -281,9 +282,7 @@ fn main() {
 
     let first_section_header = ELFSectionHeader {
         name: u32_parse_bytes(file_bytes[index..index + 4].try_into().unwrap()),
-        section_type: match u32_parse_bytes(
-            file_bytes[index + 4..index + 8].try_into().unwrap(),
-        ) {
+        section_type: match u32_parse_bytes(file_bytes[index + 4..index + 8].try_into().unwrap()) {
             0 => ELFSectionType::Null,
             1 => ELFSectionType::ProgramBits,
             2 => ELFSectionType::SymbolTable,
@@ -368,12 +367,18 @@ fn main() {
             )),
         },
     };
-    if first_section_header.name != 0{
-        println!("unknown data contained in first section header name: {}, exiting.", first_section_header.name);
+    if first_section_header.name != 0 {
+        println!(
+            "unknown data contained in first section header name: {}, exiting.",
+            first_section_header.name
+        );
         std::process::exit(0);
     }
-    if first_section_header.section_type != ELFSectionType::Null{
-        println!("unknown data contained in first section header type: {:#?}, exiting.", first_section_header.section_type);
+    if first_section_header.section_type != ELFSectionType::Null {
+        println!(
+            "unknown data contained in first section header type: {:#?}, exiting.",
+            first_section_header.section_type
+        );
         std::process::exit(0);
     }
 
@@ -382,8 +387,11 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    if flag != 0{
-        println!("unknown data contained in first section header flags: {}, exiting.", flag);
+    if flag != 0 {
+        println!(
+            "unknown data contained in first section header flags: {}, exiting.",
+            flag
+        );
         std::process::exit(0);
     }
 
@@ -391,8 +399,11 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    if address != 0{
-        println!("unknown data contained in first section header flags: {}, exiting.", address);
+    if address != 0 {
+        println!(
+            "unknown data contained in first section header flags: {}, exiting.",
+            address
+        );
         std::process::exit(0);
     }
 
@@ -400,8 +411,11 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    if offset != 0{
-        println!("unknown data contained in first section header flags: {}, exiting.", offset);
+    if offset != 0 {
+        println!(
+            "unknown data contained in first section header flags: {}, exiting.",
+            offset
+        );
         std::process::exit(0);
     }
 
@@ -409,8 +423,11 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    if address_alignment != 0{
-        println!("unknown data contained in first section header flags: {}, exiting.", address_alignment);
+    if address_alignment != 0 {
+        println!(
+            "unknown data contained in first section header flags: {}, exiting.",
+            address_alignment
+        );
         std::process::exit(0);
     }
 
@@ -418,8 +435,11 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    if entry_size != 0{
-        println!("unknown data contained in first section header flags: {}, exiting.", entry_size);
+    if entry_size != 0 {
+        println!(
+            "unknown data contained in first section header flags: {}, exiting.",
+            entry_size
+        );
         std::process::exit(0);
     }
 
@@ -427,17 +447,35 @@ fn main() {
         ELFAddress::ELF64(x) => x as u64,
         ELFAddress::ELF32(x) => x as u64,
     };
-    // TODO: check that appropriate elf_header fields are zero when using data from first section header.
-    let (section_header_entry_count, section_header_string_table_index) = if size != 0 || first_section_header.link != 0{
-        (size, first_section_header.link)
-    }else{
-        (elf_header.section_header_entry_count as u64, elf_header.section_header_string_table_index as u32)
+
+    // if the section header table size is in the first section header, the sh_size field is non zero and the
+    // ELF headers shnum field is zero
+    let section_header_entry_count = if size != 0 && elf_header.section_header_entry_count == 0 {
+        size
+    // if the section header table size is in the elf_header the first entry in the section header table has a zero sh_size field
+    // in this case, the elf header may still have a zero e_shnum field indicating that there are zero sections in the file
+    } else if size == 0 {
+        elf_header.section_header_entry_count as u64
+    // the first sections sh_size field and e_shnum field cannot both be non-zero
+    } else {
+        panic!("Section header table size conflict: elf header reports: {}, first section header reports: {}", elf_header.section_header_entry_count, size);
     };
 
-    
+    const SHN_UNDEF: u16 = 0;
+    const SHN_XINDEX: u16 = 0xFFFF;
+
+    let section_header_string_table_index =
+        if elf_header.section_header_string_table_index == SHN_UNDEF {
+            // the file has no section name string table
+            None
+        } else if elf_header.section_header_string_table_index == SHN_XINDEX {
+            Some(first_section_header.link)
+        } else {
+            Some(elf_header.section_header_string_table_index as u32)
+        };
 
     // then parse the rest
-    let mut section_headers: Vec<ELFSectionHeader> = vec![];
+    let mut section_headers: Vec<ELFSectionHeader> = vec![first_section_header];
     for section_header_index in 1..section_header_entry_count {
         let index = match elf_header.section_header_offset {
             ELFAddress::ELF64(x) => x as usize,
@@ -546,20 +584,27 @@ fn main() {
         section_headers.push(section_header);
     }
 
-    let string_table_start =
-        match section_headers[section_header_string_table_index as usize].offset {
-            ELFAddress::ELF64(x) => x as usize,
-            ELFAddress::ELF32(x) => x as usize,
-        };
-    let string_table_end =
-        match section_headers[section_header_string_table_index as usize].size {
-            ELFAddress::ELF64(x) => x as usize,
-            ELFAddress::ELF32(x) => x as usize,
-        } + string_table_start;
-    for section_header in section_headers {
-        println!("Section name: {}", unsafe {
-            get_string(&file_bytes, string_table_start + section_header.name as usize, string_table_end)
-        });
+    if let Some(string_table_index) = section_header_string_table_index {
+        // print string table names
+        let string_table_start =
+            match section_headers[string_table_index as usize].offset {
+                ELFAddress::ELF64(x) => x as usize,
+                ELFAddress::ELF32(x) => x as usize,
+            };
+        let string_table_end =
+            match section_headers[string_table_index as usize].size {
+                ELFAddress::ELF64(x) => x as usize,
+                ELFAddress::ELF32(x) => x as usize,
+            } + string_table_start;
+        for section_header in section_headers {
+            println!("Section name: {}", unsafe {
+                get_string(
+                    &file_bytes,
+                    string_table_start + section_header.name as usize,
+                    string_table_end,
+                )
+            });
+        }
     }
 }
 
