@@ -1,11 +1,13 @@
 use std::{
-    env,
     ffi::CStr,
     fs::File,
     io::Read,
+    path::PathBuf, fmt::Display,
 };
 
-bitflags::bitflags!{
+use clap::Parser;
+
+bitflags::bitflags! {
     struct ELFSectionFlags: u64{
         const WRITE = 0x1;
         const ALLOC = 0x2;
@@ -20,7 +22,6 @@ bitflags::bitflags!{
         const COMPRESSED = 0x800;
     }
 }
-
 
 #[derive(Debug)]
 struct EIdent {
@@ -129,9 +130,24 @@ struct ELFSectionHeader {
     entry_size: ELFAddress,
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about=None)]
+struct Args {
+    input_file: PathBuf,
+    /// which section headers to print, empty = all
+    #[arg(long = "sh")]
+    section_headers: Vec<u64>,
+    #[arg(long, short)]
+    /// Disables printing data printed by default (the main ELF Header)
+    no_default: bool,
+    /// which section names to print, empty = all
+    #[arg(long = "sn")]
+    section_names: Vec<u64>,
+}
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let file = File::open(&args[1]).unwrap();
+    let args: Args = Args::parse();
+    let file = File::open(args.input_file).unwrap();
     let file_bytes: Vec<u8> = file.bytes().map(|byte| byte.unwrap()).collect();
 
     let e_ident = parse_e_ident(&file_bytes);
@@ -142,12 +158,16 @@ fn main() {
             e_ident.ei_pad, [0; 7]
         );
     }
-    println!("ELF identification information:\n{:#?}", e_ident);
+    if !args.no_default {
+        println!("ELF identification information:\n{:#?}", e_ident);
+    }
 
     let (elf_header, next_byte) =
         parse_header(&file_bytes[16..], &e_ident.ei_class, &e_ident.ei_data);
 
-    println!("ELF Header info:\n{:#?}", elf_header);
+    if !args.no_default {
+        println!("ELF Header info:\n{:#?}", elf_header);
+    }
 
     let section_header_offset = match elf_header.section_header_offset {
         ELFAddress::ELF64(x) => x,
@@ -182,9 +202,15 @@ fn main() {
         } + section_header_index as usize
             * elf_header.section_header_entry_size as usize;
 
-        let section_header = parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data);
+        let section_header =
+            parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data);
 
-        println!("section header: {:#?}", section_header);
+        if args.section_headers.contains(&section_header_index) || args.section_headers.is_empty() {
+            println!(
+                "section header {}: {:#?}",
+                section_header_index, section_header
+            );
+        }
 
         section_headers.push(section_header);
     }
@@ -199,19 +225,21 @@ fn main() {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
-        for section_header in section_headers {
-            println!("Section name: {}", unsafe {
-                get_string(
-                    &file_bytes,
-                    string_table_start + section_header.name as usize,
-                    string_table_end,
-                )
-            });
+        for (index, section_header) in section_headers.iter().enumerate() {
+            if args.section_names.contains(&(index as u64)) || args.section_names.is_empty() {
+                println!("Section name {}: {}", index, unsafe {
+                    get_string(
+                        &file_bytes,
+                        string_table_start + section_header.name as usize,
+                        string_table_end,
+                    )
+                });
+            }
         }
     }
 }
 
-fn parse_section_header(bytes: &[u8], class: &ELFClass, endianness: &ELFData) -> ELFSectionHeader{
+fn parse_section_header(bytes: &[u8], class: &ELFClass, endianness: &ELFData) -> ELFSectionHeader {
     let var_index = match class {
         ELFClass::ClassNone => unreachable!(),
         ELFClass::Class32 => 24,
@@ -242,75 +270,61 @@ fn parse_section_header(bytes: &[u8], class: &ELFClass, endianness: &ELFData) ->
             18 => ELFSectionType::SYMTABSHNDX,
             _ => ELFSectionType::Null, // TODO special section types
         },
-        flags: ELFSectionFlags::from_bits_truncate(match class { // TODO: special flags
+        flags: ELFSectionFlags::from_bits_truncate(match class {
+            // TODO: special flags
             ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => u32_parse_bytes(
-                bytes[8..12].try_into().unwrap()
-            ) as u64,
-            ELFClass::Class64 => u64_parse_bytes(
-                bytes[8..16].try_into().unwrap(),
-            ) as u64,
+            ELFClass::Class32 => u32_parse_bytes(bytes[8..12].try_into().unwrap()) as u64,
+            ELFClass::Class64 => u64_parse_bytes(bytes[8..16].try_into().unwrap()) as u64,
         }),
         address: match class {
             ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[12..16].try_into().unwrap(),
-            )),
-            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
-                bytes[16..24].try_into().unwrap(),
-            )),
+            ELFClass::Class32 => {
+                ELFAddress::ELF32(u32_parse_bytes(bytes[12..16].try_into().unwrap()))
+            }
+            ELFClass::Class64 => {
+                ELFAddress::ELF64(u64_parse_bytes(bytes[16..24].try_into().unwrap()))
+            }
         },
         offset: match class {
             ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[16..20].try_into().unwrap(),
-            )),
-            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
-                bytes[24..32].try_into().unwrap(),
-            )),
+            ELFClass::Class32 => {
+                ELFAddress::ELF32(u32_parse_bytes(bytes[16..20].try_into().unwrap()))
+            }
+            ELFClass::Class64 => {
+                ELFAddress::ELF64(u64_parse_bytes(bytes[24..32].try_into().unwrap()))
+            }
         },
         size: match class {
             ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[20..24].try_into().unwrap(),
-            )),
-            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
-                bytes[32..40].try_into().unwrap(),
-            )),
+            ELFClass::Class32 => {
+                ELFAddress::ELF32(u32_parse_bytes(bytes[20..24].try_into().unwrap()))
+            }
+            ELFClass::Class64 => {
+                ELFAddress::ELF64(u64_parse_bytes(bytes[32..40].try_into().unwrap()))
+            }
         },
         link: u32_parse_bytes(bytes[var_index..var_index + 4].try_into().unwrap()),
         info: u32_parse_bytes(bytes[var_index + 4..var_index + 8].try_into().unwrap()),
         address_alignment: match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[var_index + 8..var_index + 12]
-                    .try_into()
-                    .unwrap(),
+                bytes[var_index + 8..var_index + 12].try_into().unwrap(),
             )),
             ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
-                bytes[var_index + 8..var_index + 16]
-                    .try_into()
-                    .unwrap(),
+                bytes[var_index + 8..var_index + 16].try_into().unwrap(),
             )),
         },
         entry_size: match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[var_index + 12..var_index + 16]
-                    .try_into()
-                    .unwrap(),
+                bytes[var_index + 12..var_index + 16].try_into().unwrap(),
             )),
             ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
-                bytes[var_index + 16..var_index + 24]
-                    .try_into()
-                    .unwrap(),
+                bytes[var_index + 16..var_index + 24].try_into().unwrap(),
             )),
         },
     }
-    
 }
-
-
 
 /// Parses the first section header in bytes according to the special rules for the first section header.
 ///
@@ -352,15 +366,13 @@ fn parse_first_section_header(
             18 => ELFSectionType::SYMTABSHNDX,
             _ => ELFSectionType::Null, // TODO: special section types
         },
-        flags: unsafe {ELFSectionFlags::from_bits_unchecked(match class {
-            ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => {
-                u32_parse_bytes(bytes[8..12].try_into().unwrap()) as u64
-            }
-            ELFClass::Class64 => {
-                u64_parse_bytes(bytes[8..16].try_into().unwrap())
-            }
-        })},
+        flags: unsafe {
+            ELFSectionFlags::from_bits_unchecked(match class {
+                ELFClass::ClassNone => unreachable!(),
+                ELFClass::Class32 => u32_parse_bytes(bytes[8..12].try_into().unwrap()) as u64,
+                ELFClass::Class64 => u64_parse_bytes(bytes[8..16].try_into().unwrap()),
+            })
+        },
         address: match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => {
