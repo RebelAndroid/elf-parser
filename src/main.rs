@@ -5,6 +5,23 @@ use std::{
     io::Read,
 };
 
+bitflags::bitflags!{
+    struct ELFSectionFlags: u64{
+        const WRITE = 0x1;
+        const ALLOC = 0x2;
+        const EXECINSTR = 0x4;
+        const MERGE = 0x10;
+        const STRINGS = 0x20;
+        const INFO_LINK = 0x40;
+        const LINK_ORDER = 0x80;
+        const OS_NON_CONFORMIGN = 0x100;
+        const GROUP = 0x200;
+        const TLS = 0x400;
+        const COMPRESSED = 0x800;
+    }
+}
+
+
 #[derive(Debug)]
 struct EIdent {
     ei_mag: [u8; 4],
@@ -102,7 +119,7 @@ enum ELFSectionType {
 struct ELFSectionHeader {
     name: u32,
     section_type: ELFSectionType,
-    flags: ELFAddress,
+    flags: ELFSectionFlags,
     address: ELFAddress,
     offset: ELFAddress,
     size: ELFAddress,
@@ -128,7 +145,7 @@ fn main() {
     println!("ELF identification information:\n{:#?}", e_ident);
 
     let (elf_header, next_byte) =
-        parse_header(&file_bytes[16..], e_ident.ei_class, e_ident.ei_data);
+        parse_header(&file_bytes[16..], &e_ident.ei_class, &e_ident.ei_data);
 
     println!("ELF Header info:\n{:#?}", elf_header);
 
@@ -151,9 +168,9 @@ fn main() {
     let (first_section_header, section_header_entry_count, section_header_string_table_index) =
         parse_first_section_header(
             &file_bytes[section_header_offset as usize..],
-            elf_header,
-            e_ident.ei_class,
-            e_ident.ei_data,
+            &elf_header,
+            &e_ident.ei_class,
+            &e_ident.ei_data,
         );
 
     // then parse the rest
@@ -165,7 +182,7 @@ fn main() {
         } + section_header_index as usize
             * elf_header.section_header_entry_size as usize;
 
-        let section_header = parse_section_header(&file_bytes[index..], e_ident.ei_class, e_ident.ei_data);
+        let section_header = parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data);
 
         println!("section header: {:#?}", section_header);
 
@@ -194,14 +211,14 @@ fn main() {
     }
 }
 
-fn parse_section_header(bytes: &[u8], class: ELFClass, endianness: ELFData) -> ELFSectionHeader{
+fn parse_section_header(bytes: &[u8], class: &ELFClass, endianness: &ELFData) -> ELFSectionHeader{
     let var_index = match class {
         ELFClass::ClassNone => unreachable!(),
         ELFClass::Class32 => 24,
         ELFClass::Class64 => 40,
     };
 
-    let (u16_parse_bytes, u32_parse_bytes, u64_parse_bytes) = get_parse_functions(endianness);
+    let (_, u32_parse_bytes, u64_parse_bytes) = get_parse_functions(endianness);
 
     ELFSectionHeader {
         name: u32_parse_bytes(bytes[0..4].try_into().unwrap()),
@@ -225,15 +242,15 @@ fn parse_section_header(bytes: &[u8], class: ELFClass, endianness: ELFData) -> E
             18 => ELFSectionType::SYMTABSHNDX,
             _ => ELFSectionType::Null, // TODO special section types
         },
-        flags: match class {
+        flags: ELFSectionFlags::from_bits_truncate(match class { // TODO: special flags
             ELFClass::ClassNone => unreachable!(),
-            ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
-                bytes[8..12].try_into().unwrap(),
-            )),
-            ELFClass::Class64 => ELFAddress::ELF64(u64_parse_bytes(
+            ELFClass::Class32 => u32_parse_bytes(
+                bytes[8..12].try_into().unwrap()
+            ) as u64,
+            ELFClass::Class64 => u64_parse_bytes(
                 bytes[8..16].try_into().unwrap(),
-            )),
-        },
+            ) as u64,
+        }),
         address: match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => ELFAddress::ELF32(u32_parse_bytes(
@@ -300,9 +317,9 @@ fn parse_section_header(bytes: &[u8], class: ELFClass, endianness: ELFData) -> E
 /// Returns the first section header, the number of entires in the section header table and the index of the section name string table if it exists
 fn parse_first_section_header(
     bytes: &[u8],
-    elf_header: ELFHeader,
-    class: ELFClass,
-    endianness: ELFData,
+    elf_header: &ELFHeader,
+    class: &ELFClass,
+    endianness: &ELFData,
 ) -> (ELFSectionHeader, u64, Option<u32>) {
     // first parse the first section header because it is special
     let var_index = match class {
@@ -333,17 +350,17 @@ fn parse_first_section_header(
             16 => ELFSectionType::PreInitArray,
             17 => ELFSectionType::Group,
             18 => ELFSectionType::SYMTABSHNDX,
-            _ => ELFSectionType::Null, // TODO special section types
+            _ => ELFSectionType::Null, // TODO: special section types
         },
-        flags: match class {
+        flags: unsafe {ELFSectionFlags::from_bits_unchecked(match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => {
-                ELFAddress::ELF32(u32_parse_bytes(bytes[8..12].try_into().unwrap()))
+                u32_parse_bytes(bytes[8..12].try_into().unwrap()) as u64
             }
             ELFClass::Class64 => {
-                ELFAddress::ELF64(u64_parse_bytes(bytes[8..16].try_into().unwrap()))
+                u64_parse_bytes(bytes[8..16].try_into().unwrap())
             }
-        },
+        })},
         address: match class {
             ELFClass::ClassNone => unreachable!(),
             ELFClass::Class32 => {
@@ -407,11 +424,7 @@ fn parse_first_section_header(
         std::process::exit(0);
     }
 
-    // the bits of the flag data in the first section header, extended to 64 bits
-    let flag = match first_section_header.flags {
-        ELFAddress::ELF64(x) => x as u64,
-        ELFAddress::ELF32(x) => x as u64,
-    };
+    let flag = first_section_header.flags.bits;
     if flag != 0 {
         println!(
             "unknown data contained in first section header flags: {}, exiting.",
@@ -509,7 +522,7 @@ fn parse_first_section_header(
 ///
 /// Panics if endianness == ELFData::ELFDataNone.
 fn get_parse_functions(
-    endianness: ELFData,
+    endianness: &ELFData,
 ) -> (fn([u8; 2]) -> u16, fn([u8; 4]) -> u32, fn([u8; 8]) -> u64) {
     let u16_parse_bytes = match endianness {
         ELFData::ELFDataNone => unreachable!(),
@@ -574,7 +587,7 @@ fn parse_e_ident(bytes: &[u8]) -> EIdent {
 /// Parses an ELFHeader starting at the beginning of bytes using the specified class and data endianness.
 ///
 /// Returns a tuple containing the elf header, and the index of the byte immediately following the header.
-fn parse_header(bytes: &[u8], class: ELFClass, endianness: ELFData) -> (ELFHeader, usize) {
+fn parse_header(bytes: &[u8], class: &ELFClass, endianness: &ELFData) -> (ELFHeader, usize) {
     // where the indices of the ELFHeader start after the variable length portion
     // the index of the first byte of flags
     let index = match class {
