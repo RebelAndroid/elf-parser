@@ -1,9 +1,4 @@
-use std::{
-    ffi::CStr,
-    fs::File,
-    io::Read,
-    path::PathBuf, fmt::Display,
-};
+use std::{ffi::CStr, fs::File, io::Read, path::PathBuf};
 
 use clap::Parser;
 
@@ -134,15 +129,15 @@ struct ELFSectionHeader {
 #[command(author, version, about, long_about=None)]
 struct Args {
     input_file: PathBuf,
-    /// which section headers to print, empty = all
-    #[arg(long = "sh")]
-    section_headers: Vec<u64>,
+    /// which section headers to print, or ALL
+    #[arg(long)]
+    section_headers: Option<String>,
     #[arg(long, short)]
     /// Disables printing data printed by default (the main ELF Header)
     no_default: bool,
-    /// which section names to print, empty = all
-    #[arg(long = "sn")]
-    section_names: Vec<u64>,
+    /// which section names to print, or ALL
+    #[arg(long)]
+    section_names: Option<String>,
 }
 
 fn main() {
@@ -195,24 +190,30 @@ fn main() {
 
     // then parse the rest
     let mut section_headers: Vec<ELFSectionHeader> = vec![first_section_header];
+
     for section_header_index in 1..section_header_entry_count {
         let index = match elf_header.section_header_offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + section_header_index as usize
             * elf_header.section_header_entry_size as usize;
-
-        let section_header =
-            parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data);
-
-        if args.section_headers.contains(&section_header_index) || args.section_headers.is_empty() {
-            println!(
-                "section header {}: {:#?}",
-                section_header_index, section_header
-            );
+        section_headers.push(parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data));
+    }
+    if let Some(section_header_indices_string) = args.section_headers {
+        let section_header_indices = section_header_indices_string
+            .split(",")
+            .filter_map(|s| {
+                match s.parse::<usize>(){
+                    Ok(x) => Some(x),
+                    Err(_) => None,
+                }
+            })
+            .collect::<Vec<usize>>();
+        for (index, section_header) in section_headers.iter().enumerate() {
+            if section_header_indices.contains(&index) || section_header_indices_string == "all" {
+                println!("section header {}: {:#?}", index, section_header);
+            }
         }
-
-        section_headers.push(section_header);
     }
 
     if let Some(string_table_index) = section_header_string_table_index {
@@ -225,15 +226,29 @@ fn main() {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
-        for (index, section_header) in section_headers.iter().enumerate() {
-            if args.section_names.contains(&(index as u64)) || args.section_names.is_empty() {
-                println!("Section name {}: {}", index, unsafe {
-                    get_string(
-                        &file_bytes,
-                        string_table_start + section_header.name as usize,
-                        string_table_end,
-                    )
-                });
+
+        if let Some(section_name_indices_string) = args.section_names {
+            // collect indices from provided list
+            let section_name_indices = section_name_indices_string
+                .split(",")
+                .filter_map(|s| {
+                    match s.parse::<usize>(){
+                        Ok(x) => Some(x),
+                        Err(_) => None,
+                    }
+                })
+                .collect::<Vec<usize>>();
+            for (index, section_header) in section_headers.iter().enumerate() {
+                // print those or indices, or all section headers if no indices are provided
+                if section_name_indices.contains(&index) || section_name_indices_string == "all" {
+                    println!("Section name {}: {}", index, unsafe {
+                        get_string(
+                            &file_bytes,
+                            string_table_start + section_header.name as usize,
+                            string_table_end,
+                        )
+                    });
+                }
             }
         }
     }
@@ -342,7 +357,7 @@ fn parse_first_section_header(
         ELFClass::Class64 => 40,
     };
 
-    let (u16_parse_bytes, u32_parse_bytes, u64_parse_bytes) = get_parse_functions(endianness);
+    let (_, u32_parse_bytes, u64_parse_bytes) = get_parse_functions(endianness);
 
     let first_section_header = ELFSectionHeader {
         name: u32_parse_bytes(bytes[0..4].try_into().unwrap()),
