@@ -11,7 +11,7 @@ bitflags::bitflags! {
         const STRINGS = 0x20;
         const INFO_LINK = 0x40;
         const LINK_ORDER = 0x80;
-        const OS_NON_CONFORMIGN = 0x100;
+        const OS_NON_CONFORMING = 0x100;
         const GROUP = 0x200;
         const TLS = 0x400;
         const COMPRESSED = 0x800;
@@ -140,10 +140,20 @@ struct Args {
     section_names: Option<String>,
 }
 
+enum InputIndices {
+    NONE,
+    ALL,
+    Indices(Vec<usize>),
+}
+
 fn main() {
     let args: Args = Args::parse();
-    let file = File::open(args.input_file).unwrap();
-    let file_bytes: Vec<u8> = file.bytes().map(|byte| byte.unwrap()).collect();
+    let section_header_input_indices = parse_input_indices(args.section_headers);
+    let section_name_input_indices = parse_input_indices(args.section_names);
+
+    let mut file = File::open(args.input_file).unwrap();
+    let mut file_bytes = vec![0; file.metadata().unwrap().len() as usize];
+    file.read(&mut file_bytes).unwrap();
 
     let e_ident = parse_e_ident(&file_bytes);
 
@@ -188,7 +198,7 @@ fn main() {
             &e_ident.ei_data,
         );
 
-    // then parse the rest
+    // parse the rest of the section headers
     let mut section_headers: Vec<ELFSectionHeader> = vec![first_section_header];
 
     for section_header_index in 1..section_header_entry_count {
@@ -197,27 +207,56 @@ fn main() {
             ELFAddress::ELF32(x) => x as usize,
         } + section_header_index as usize
             * elf_header.section_header_entry_size as usize;
-        section_headers.push(parse_section_header(&file_bytes[index..], &e_ident.ei_class, &e_ident.ei_data));
-    }
-    if let Some(section_header_indices_string) = args.section_headers {
-        let section_header_indices = section_header_indices_string
-            .split(",")
-            .filter_map(|s| {
-                match s.parse::<usize>(){
-                    Ok(x) => Some(x),
-                    Err(_) => None,
-                }
-            })
-            .collect::<Vec<usize>>();
-        for (index, section_header) in section_headers.iter().enumerate() {
-            if section_header_indices.contains(&index) || section_header_indices_string == "all" {
-                println!("section header {}: {:#?}", index, section_header);
-            }
-        }
+        section_headers.push(parse_section_header(
+            &file_bytes[index..],
+            &e_ident.ei_class,
+            &e_ident.ei_data,
+        ));
     }
 
+    print_section_names(section_header_string_table_index, &section_headers, section_name_input_indices, &file_bytes);
+    
+    print_section_headers(&section_headers, section_header_input_indices);
+}
+
+/// Parses an input string containing indices into a section header input.
+/// Input is either None, or Some containing "all" (case-insensitive) or a list of usizes seperated by commas
+fn parse_input_indices(input: Option<String>) -> InputIndices {
+    match input {
+        Some(input_string) => {
+            if (input_string.eq_ignore_ascii_case("all")) {
+                InputIndices::ALL
+            } else {
+                InputIndices::Indices(
+                    input_string
+                        .split(",")
+                        .filter_map(|s| match s.parse::<usize>() {
+                            Ok(x) => Some(x),
+                            Err(_) => None,
+                        })
+                        .collect::<Vec<usize>>(),
+                )
+            }
+        }
+        None => InputIndices::NONE,
+    }
+}
+
+fn print_section_headers(section_headers: &Vec<ELFSectionHeader>, section_header_input_indices: InputIndices){
+    match section_header_input_indices{
+        InputIndices::NONE => {},
+        InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate(){
+            println!("section header {}: {:#?}", index, section_header);
+        },
+        InputIndices::Indices(indices) => for index in indices{
+            println!("section header {}: {:#?}", index, section_headers[index]);
+        },
+    }
+}
+
+/// Prints the section names as requested in InputIndices (including printing nothing if `section_name_input_indices == InputIndices::None`)
+fn print_section_names(section_header_string_table_index: Option<u32>, section_headers: &Vec<ELFSectionHeader>, section_name_input_indices: InputIndices, file_bytes: &Vec<u8>){
     if let Some(string_table_index) = section_header_string_table_index {
-        // print string table names
         let string_table_start = match section_headers[string_table_index as usize].offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
@@ -226,30 +265,26 @@ fn main() {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
-
-        if let Some(section_name_indices_string) = args.section_names {
-            // collect indices from provided list
-            let section_name_indices = section_name_indices_string
-                .split(",")
-                .filter_map(|s| {
-                    match s.parse::<usize>(){
-                        Ok(x) => Some(x),
-                        Err(_) => None,
-                    }
-                })
-                .collect::<Vec<usize>>();
-            for (index, section_header) in section_headers.iter().enumerate() {
-                // print those or indices, or all section headers if no indices are provided
-                if section_name_indices.contains(&index) || section_name_indices_string == "all" {
-                    println!("Section name {}: {}", index, unsafe {
-                        get_string(
-                            &file_bytes,
-                            string_table_start + section_header.name as usize,
-                            string_table_end,
-                        )
-                    });
-                }
-            }
+        match section_name_input_indices{
+            InputIndices::NONE => {},
+            InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate() {
+                println!("Section name {}:  {}", index, unsafe {
+                    get_string(
+                        file_bytes,
+                        string_table_start + section_header.name as usize,
+                        string_table_end,
+                    )
+                });
+            },
+            InputIndices::Indices(indices) => for index in indices {
+                println!("Section name {}:  {}", index, unsafe {
+                    get_string(
+                        file_bytes,
+                        string_table_start + section_headers[index].name as usize,
+                        string_table_end,
+                    )
+                });
+            },
         }
     }
 }
