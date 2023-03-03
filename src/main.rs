@@ -1,4 +1,4 @@
-use std::{ffi::CStr, fs::File, io::Read, path::PathBuf};
+use std::{ffi::CStr, fs::File, io::Read, path::PathBuf, vec};
 
 use clap::Parser;
 
@@ -135,9 +135,9 @@ struct Args {
     #[arg(long, short)]
     /// Disables printing data printed by default (the main ELF Header)
     no_default: bool,
-    /// which section names to print, or ALL
-    #[arg(long)]
-    section_names: Option<String>,
+    // which section names to print, or ALL
+    // #[arg(long)]
+    // section_names: Option<String>,
 }
 
 enum InputIndices {
@@ -149,7 +149,7 @@ enum InputIndices {
 fn main() {
     let args: Args = Args::parse();
     let section_header_input_indices = parse_input_indices(args.section_headers);
-    let section_name_input_indices = parse_input_indices(args.section_names);
+    //let section_name_input_indices = parse_input_indices(args.section_names);
 
     let mut file = File::open(args.input_file).unwrap();
     let mut file_bytes = vec![0; file.metadata().unwrap().len() as usize];
@@ -213,10 +213,8 @@ fn main() {
             &e_ident.ei_data,
         ));
     }
-
-    print_section_names(section_header_string_table_index, &section_headers, section_name_input_indices, &file_bytes);
     
-    print_section_headers(&section_headers, section_header_input_indices);
+    print_section_headers(&section_headers, section_header_input_indices, section_header_string_table_index, &file_bytes);
 }
 
 /// Parses an input string containing indices into a section header input.
@@ -242,21 +240,8 @@ fn parse_input_indices(input: Option<String>) -> InputIndices {
     }
 }
 
-fn print_section_headers(section_headers: &Vec<ELFSectionHeader>, section_header_input_indices: InputIndices){
-    match section_header_input_indices{
-        InputIndices::NONE => {},
-        InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate(){
-            println!("section header {}: {:#?}", index, section_header);
-        },
-        InputIndices::Indices(indices) => for index in indices{
-            println!("section header {}: {:#?}", index, section_headers[index]);
-        },
-    }
-}
-
-/// Prints the section names as requested in InputIndices (including printing nothing if `section_name_input_indices == InputIndices::None`)
-fn print_section_names(section_header_string_table_index: Option<u32>, section_headers: &Vec<ELFSectionHeader>, section_name_input_indices: InputIndices, file_bytes: &Vec<u8>){
-    if let Some(string_table_index) = section_header_string_table_index {
+fn print_section_headers(section_headers: &Vec<ELFSectionHeader>, section_header_input_indices: InputIndices, section_header_string_table_index: Option<u32>, file_bytes: &[u8]){
+    let section_names = if let Some(string_table_index) = section_header_string_table_index {
         let string_table_start = match section_headers[string_table_index as usize].offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
@@ -265,27 +250,35 @@ fn print_section_names(section_header_string_table_index: Option<u32>, section_h
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
-        match section_name_input_indices{
-            InputIndices::NONE => {},
-            InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate() {
-                println!("Section name {}:  {}", index, unsafe {
-                    get_string(
-                        file_bytes,
-                        string_table_start + section_header.name as usize,
-                        string_table_end,
-                    )
-                });
-            },
-            InputIndices::Indices(indices) => for index in indices {
-                println!("Section name {}:  {}", index, unsafe {
-                    get_string(
-                        file_bytes,
-                        string_table_start + section_headers[index].name as usize,
-                        string_table_end,
-                    )
-                });
-            },
+        let mut section_names = vec![];
+        for section_header in section_headers{
+            section_names.push(unsafe{get_string(
+                file_bytes,
+                string_table_start + section_header.name as usize,
+                string_table_end,
+            )
+            });
         }
+        Some(section_names)
+            
+    }else{
+        None
+    };
+
+    match section_header_input_indices{
+        InputIndices::NONE => {},
+        InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate(){
+            println!("section header {} ({}): {:#?}", match &section_names{
+                Some(s) => s.get(index).unwrap(),
+                None => "",
+            }, index, section_header);
+        },
+        InputIndices::Indices(indices) => for index in indices{
+            println!("section header {} ({}): {:#?}", match &section_names{
+                Some(s) => s.get(index).unwrap(),
+                None => "",
+            }, index, section_headers[index]);
+        },
     }
 }
 
