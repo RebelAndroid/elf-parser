@@ -1,4 +1,4 @@
-use std::{ffi::CStr, fs::File, io::Read, path::PathBuf, vec};
+use std::{ffi::CStr, fs::File, io::Read, path::PathBuf, vec, fmt::Display};
 
 use clap::Parser;
 
@@ -144,6 +144,7 @@ enum InputIndices {
     NONE,
     ALL,
     Indices(Vec<usize>),
+    Names(Vec<String>),
 }
 
 fn main() {
@@ -167,7 +168,7 @@ fn main() {
         println!("ELF identification information:\n{:#?}", e_ident);
     }
 
-    let (elf_header, next_byte) =
+    let (elf_header, _next_byte) =
         parse_header(&file_bytes[16..], &e_ident.ei_class, &e_ident.ei_data);
 
     if !args.no_default {
@@ -213,8 +214,13 @@ fn main() {
             &e_ident.ei_data,
         ));
     }
-    
-    print_section_headers(&section_headers, section_header_input_indices, section_header_string_table_index, &file_bytes);
+
+    print_section_headers(
+        &section_headers,
+        section_header_input_indices,
+        section_header_string_table_index,
+        &file_bytes,
+    );
 }
 
 /// Parses an input string containing indices into a section header input.
@@ -222,25 +228,40 @@ fn main() {
 fn parse_input_indices(input: Option<String>) -> InputIndices {
     match input {
         Some(input_string) => {
-            if (input_string.eq_ignore_ascii_case("all")) {
+            if input_string.eq_ignore_ascii_case("all") {
                 InputIndices::ALL
             } else {
-                InputIndices::Indices(
-                    input_string
-                        .split(",")
-                        .filter_map(|s| match s.parse::<usize>() {
-                            Ok(x) => Some(x),
-                            Err(_) => None,
-                        })
-                        .collect::<Vec<usize>>(),
-                )
+                // TODO: optimize
+                let mut x = input_string.split(",");
+                let s = x.next().unwrap();
+                if s.parse::<usize>().is_ok() {
+                    InputIndices::Indices(
+                        input_string
+                            .split(",")
+                            .filter_map(|s| match s.parse::<usize>() {
+                                Ok(x) => Some(x),
+                                Err(_) => None,
+                            })
+                            .collect::<Vec<usize>>(),
+                    )    
+                }else{
+                    InputIndices::Names(input_string
+                        .split(",").map(|s| s.to_string())
+                        .collect::<Vec<String>>())
+                }
+                
             }
         }
         None => InputIndices::NONE,
     }
 }
 
-fn print_section_headers(section_headers: &Vec<ELFSectionHeader>, section_header_input_indices: InputIndices, section_header_string_table_index: Option<u32>, file_bytes: &[u8]){
+fn print_section_headers(
+    section_headers: &Vec<ELFSectionHeader>,
+    section_header_input_indices: InputIndices,
+    section_header_string_table_index: Option<u32>,
+    file_bytes: &[u8],
+) {
     let section_names = if let Some(string_table_index) = section_header_string_table_index {
         let string_table_start = match section_headers[string_table_index as usize].offset {
             ELFAddress::ELF64(x) => x as usize,
@@ -251,34 +272,69 @@ fn print_section_headers(section_headers: &Vec<ELFSectionHeader>, section_header
             ELFAddress::ELF32(x) => x as usize,
         } + string_table_start;
         let mut section_names = vec![];
-        for section_header in section_headers{
-            section_names.push(unsafe{get_string(
-                file_bytes,
-                string_table_start + section_header.name as usize,
-                string_table_end,
-            )
+        for section_header in section_headers {
+            section_names.push(unsafe {
+                get_string(
+                    file_bytes,
+                    string_table_start + section_header.name as usize,
+                    string_table_end,
+                )
             });
         }
         Some(section_names)
-            
-    }else{
+    } else {
         None
     };
 
-    match section_header_input_indices{
-        InputIndices::NONE => {},
-        InputIndices::ALL => for (index, section_header) in section_headers.iter().enumerate(){
-            println!("section header {} ({}): {:#?}", match &section_names{
-                Some(s) => s.get(index).unwrap(),
-                None => "",
-            }, index, section_header);
-        },
-        InputIndices::Indices(indices) => for index in indices{
-            println!("section header {} ({}): {:#?}", match &section_names{
-                Some(s) => s.get(index).unwrap(),
-                None => "",
-            }, index, section_headers[index]);
-        },
+    match section_header_input_indices {
+        InputIndices::NONE => {}
+        InputIndices::ALL => {
+            for (index, section_header) in section_headers.iter().enumerate() {
+                println!(
+                    "section header {} ({}): {:#?}",
+                    match &section_names {
+                        Some(s) => s.get(index).unwrap(),
+                        None => "",
+                    },
+                    index,
+                    section_header
+                );
+            }
+        }
+        InputIndices::Indices(indices) => {
+            for index in indices {
+                println!(
+                    "section header {} ({}): {:#?}",
+                    match &section_names {
+                        Some(s) => s.get(index).unwrap(),
+                        None => "",
+                    },
+                    index,
+                    section_headers[index]
+                );
+            }
+        }
+        InputIndices::Names(names) => {
+            for (index, section_header) in
+                section_headers
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _header)| match &section_names {
+                        Some(s) => names.contains(s.get(*index).unwrap()),
+                        None => false,
+                    })
+            {
+                println!(
+                    "section header {} ({}): {:#?}",
+                    match &section_names {
+                        Some(s) => s.get(index).unwrap(),
+                        None => "",
+                    },
+                    index,
+                    section_header
+                );
+            }
+        }
     }
 }
 
