@@ -1,4 +1,4 @@
-use std::{ffi::CStr, fs::File, io::Read, path::PathBuf, vec, fmt::Display};
+use std::{ffi::CStr, fs::File, io::Read, path::PathBuf, vec};
 
 use clap::Parser;
 
@@ -18,7 +18,16 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    struct ELFSegmentFlags: u32{
+        const EXECUTE = 0x1;
+        const WRITE = 0x2;
+        const READ = 0x4;
+    }
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 struct EIdent {
     ei_mag: [u8; 4],
     ei_class: ELFClass,
@@ -74,6 +83,7 @@ enum ELFMachine {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ELFHeader {
     e_type: ELFType,
     machine: ELFMachine,
@@ -111,7 +121,21 @@ enum ELFSectionType {
     SYMTABSHNDX,
 }
 
+#[derive(Debug, PartialEq)]
+enum ELFSegmentType {
+    Null,
+    Load,
+    Dynamic,
+    Interpreter,
+    Note,
+    SHLib,
+    ProgramHeader,
+    ThreadLocalStorage,
+    Unknown(u32),
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ELFSectionHeader {
     name: u32,
     section_type: ELFSectionType,
@@ -125,6 +149,19 @@ struct ELFSectionHeader {
     entry_size: ELFAddress,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+struct ELFSegmentHeader {
+    segment_type: ELFSegmentType,
+    segment_flags: ELFSegmentFlags,
+    offset: ELFAddress,
+    virtual_adress: ELFAddress,
+    p_address: ELFAddress,
+    file_size: ELFAddress,
+    memory_size: ELFAddress,
+    alignment: ELFAddress,
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about=None)]
 struct Args {
@@ -135,9 +172,6 @@ struct Args {
     #[arg(long, short)]
     /// Disables printing data printed by default (the main ELF Header)
     no_default: bool,
-    // which section names to print, or ALL
-    // #[arg(long)]
-    // section_names: Option<String>,
 }
 
 enum InputIndices {
@@ -150,7 +184,6 @@ enum InputIndices {
 fn main() {
     let args: Args = Args::parse();
     let section_header_input_indices = parse_input_indices(args.section_headers);
-    //let section_name_input_indices = parse_input_indices(args.section_names);
 
     let mut file = File::open(args.input_file).unwrap();
     let mut file_bytes = vec![0; file.metadata().unwrap().len() as usize];
@@ -203,6 +236,7 @@ fn main() {
     let mut section_headers: Vec<ELFSectionHeader> = vec![first_section_header];
 
     for section_header_index in 1..section_header_entry_count {
+        // the byte index of the current section header
         let index = match elf_header.section_header_offset {
             ELFAddress::ELF64(x) => x as usize,
             ELFAddress::ELF32(x) => x as usize,
@@ -215,12 +249,108 @@ fn main() {
         ));
     }
 
+    let mut segment_headers: Vec<ELFSegmentHeader> = vec![];
+    for program_header_index in 1..elf_header.program_header_entry_count {
+        // the byte index of the current program header
+        let index = match elf_header.program_header_offset {
+            ELFAddress::ELF64(x) => x as usize,
+            ELFAddress::ELF32(x) => x as usize,
+        } + program_header_index as usize
+            * elf_header.program_header_entry_size as usize;
+        segment_headers.push(parse_segment_header(
+            &file_bytes[index..],
+            &e_ident.ei_class,
+            &e_ident.ei_data,
+        ));
+    }
+
+    for segment_header in segment_headers{
+        println!("segment header: {:#?}", segment_header);
+        if segment_header.segment_type == ELFSegmentType::Note {
+            unsafe{
+                let offset = match segment_header.offset{
+                    ELFAddress::ELF64(x) => x as usize,
+                    ELFAddress::ELF32(x) => x as usize,
+                };
+                let end = offset + match segment_header.file_size{
+                    ELFAddress::ELF64(x) => x as usize,
+                    ELFAddress::ELF32(x) => x as usize,
+                };
+                let (_, u32_parse_bytes, _) = get_parse_functions(&e_ident.ei_data);
+                // the size of the name, including the null terminator
+                let namesz = u32_parse_bytes(file_bytes[offset..(offset + 4)].try_into().unwrap());
+                let descsz = u32_parse_bytes(file_bytes[(offset + 4)..(offset + 8)].try_into().unwrap());
+                let note_type = u32_parse_bytes(file_bytes[(offset + 8)..(offset + 12)].try_into().unwrap());
+                let name = get_string(&file_bytes[offset..end], 12, end);
+                println!("namesz: {}, descz: {}, type: {}, name: {}", namesz, descsz, note_type, name);
+            }
+        }
+    }
+
     print_section_headers(
         &section_headers,
         section_header_input_indices,
         section_header_string_table_index,
         &file_bytes,
     );
+}
+
+fn parse_segment_header(
+    bytes: &[u8],
+    elf_class: &ELFClass,
+    endianness: &ELFData,
+) -> ELFSegmentHeader {
+    let (_, u32_parse_bytes, u64_parse_bytes) = get_parse_functions(endianness);
+
+    match elf_class {
+        ELFClass::ClassNone => unreachable!(),
+        ELFClass::Class32 => ELFSegmentHeader {
+            segment_type: match u32_parse_bytes(bytes[0..4].try_into().unwrap()) {
+                0 => ELFSegmentType::Null,
+                1 => ELFSegmentType::Load,
+                2 => ELFSegmentType::Dynamic,
+                3 => ELFSegmentType::Interpreter,
+                4 => ELFSegmentType::Note,
+                5 => ELFSegmentType::SHLib,
+                6 => ELFSegmentType::ProgramHeader,
+                7 => ELFSegmentType::ThreadLocalStorage,
+                x => ELFSegmentType::Unknown(x),
+            },
+            offset: ELFAddress::ELF32(u32_parse_bytes(bytes[4..8].try_into().unwrap())),
+            virtual_adress: ELFAddress::ELF32(u32_parse_bytes(bytes[8..12].try_into().unwrap())),
+            p_address: ELFAddress::ELF32(u32_parse_bytes(bytes[12..16].try_into().unwrap())),
+            file_size: ELFAddress::ELF32(u32_parse_bytes(bytes[16..20].try_into().unwrap())),
+            memory_size: ELFAddress::ELF32(u32_parse_bytes(bytes[20..24].try_into().unwrap())),
+            segment_flags: ELFSegmentFlags::from_bits(u32_parse_bytes(
+                bytes[24..28].try_into().unwrap(),
+            ))
+            .unwrap(),
+            alignment: ELFAddress::ELF32(u32_parse_bytes(bytes[28..32].try_into().unwrap())),
+        },
+        ELFClass::Class64 => ELFSegmentHeader {
+            segment_type: match u32_parse_bytes(bytes[0..4].try_into().unwrap()) {
+                0 => ELFSegmentType::Null,
+                1 => ELFSegmentType::Load,
+                2 => ELFSegmentType::Dynamic,
+                3 => ELFSegmentType::Interpreter,
+                4 => ELFSegmentType::Note,
+                5 => ELFSegmentType::SHLib,
+                6 => ELFSegmentType::ProgramHeader,
+                7 => ELFSegmentType::ThreadLocalStorage,
+                x => ELFSegmentType::Unknown(x),
+            },
+            segment_flags: ELFSegmentFlags::from_bits(u32_parse_bytes(
+                bytes[4..8].try_into().unwrap(),
+            ))
+            .unwrap(),
+            offset: ELFAddress::ELF64(u64_parse_bytes(bytes[8..16].try_into().unwrap())),
+            virtual_adress: ELFAddress::ELF64(u64_parse_bytes(bytes[16..24].try_into().unwrap())),
+            p_address: ELFAddress::ELF64(u64_parse_bytes(bytes[24..32].try_into().unwrap())),
+            file_size: ELFAddress::ELF64(u64_parse_bytes(bytes[32..40].try_into().unwrap())),
+            memory_size: ELFAddress::ELF64(u64_parse_bytes(bytes[40..48].try_into().unwrap())),
+            alignment: ELFAddress::ELF64(u64_parse_bytes(bytes[48..56].try_into().unwrap())),
+        },
+    }
 }
 
 /// Parses an input string containing indices into a section header input.
@@ -243,13 +373,15 @@ fn parse_input_indices(input: Option<String>) -> InputIndices {
                                 Err(_) => None,
                             })
                             .collect::<Vec<usize>>(),
-                    )    
-                }else{
-                    InputIndices::Names(input_string
-                        .split(",").map(|s| s.to_string())
-                        .collect::<Vec<String>>())
+                    )
+                } else {
+                    InputIndices::Names(
+                        input_string
+                            .split(",")
+                            .map(|s| s.to_string())
+                            .collect::<Vec<String>>(),
+                    )
                 }
-                
             }
         }
         None => InputIndices::NONE,
